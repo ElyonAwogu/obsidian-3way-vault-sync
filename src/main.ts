@@ -16,7 +16,7 @@ interface SyncSettings {
 }
 
 const DEFAULT_SETTINGS: SyncSettings = {
-  googleClientId: "807360394396-e1ooh5qumssa200g6pgupihh1uu2cn6n.apps.googleusercontent.com"
+  googleClientId: "807360394396-nqu43rj4faeajop4cdmp5p99err8nvoi.apps.googleusercontent.com"
 };
 
 export default class ThreeWaySyncPlugin extends Plugin {

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Authenticating Obsidian Sync...</title>
+</head>
+<body>
+    <p>Redirecting back to Obsidian. If nothing happens, click the link below:</p>
+    <a id="manual-link" href="#">Return to Obsidian</a>
+
+    <script>
+        // Grab the OAuth code parameters sent by Google
+        const urlParams = window.location.search;
+        
+        // Construct the deep link back to your Obsidian app
+        const obsidianUri = "obsidian://obsidian-3way-vault-sync" + urlParams;
+        
+        // Update the manual link just in case
+        document.getElementById("manual-link").href = obsidianUri;
+        
+        // Instantly redirect the browser to the Obsidian app
+        window.location.replace(obsidianUri);
+    </script>
+</body>
+</html>
