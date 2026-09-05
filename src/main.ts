@@ -1,114 +1,142 @@
-import {
-	Editor,
-	MarkdownView,
-	MarkdownFileInfo,
-	Modal,
-	Notice,
-	Plugin,
-} from 'obsidian';
-import {
-	DEFAULT_SETTINGS,
-	MyPluginSettings,
-	SampleSettingTab,
-} from './settings';
+import { Plugin, ObsidianProtocolData, requestUrl, Notice, TFile } from 'obsidian';
+import { PKCE } from './PKCE';
+import { AutoKeyManager } from './AutoKeyManager';
+import { VaultCipher } from './VaultCipher';
+import { GoogleDriveAdapter } from './GoogleDriveAdapter';
 
-// Remember to rename these classes and interfaces!
-
-export default class MyPlugin extends Plugin {
-	settings!: MyPluginSettings;
-
-	async onload() {
-		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			},
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (
-				editor: Editor,
-				_ctx: MarkdownView | MarkdownFileInfo,
-			) => {
-				editor.replaceSelection('Sample editor command');
-			},
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView =
-					this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			},
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(activeDocument, 'click', (_evt: MouseEvent) => {
-			new Notice('Click');
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(
-			window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000),
-		);
-	}
-
-	onunload() {}
-
-	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			(await this.loadData()) as Partial<MyPluginSettings>,
-		);
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+interface SyncSettings {
+  googleClientId: string;
+  codeVerifier?: string;
+  tokens?: {
+    accessToken: string;
+    refreshToken: string;
+  };
+  googleUserId?: string;
+  folderId?: string;
 }
 
-class SampleModal extends Modal {
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.setText('Woah!');
-	}
+const DEFAULT_SETTINGS: SyncSettings = {
+  googleClientId: "807360394396-e1ooh5qumssa200g6pgupihh1uu2cn6n.apps.googleusercontent.com"
+};
 
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
-	}
+export default class ThreeWaySyncPlugin extends Plugin {
+  settings: SyncSettings;
+  cryptoKey: CryptoKey | null = null;
+
+  async onload() {
+    await this.loadSettings();
+
+    // Register protocol handler for obsidian://obsidian-3way-vault-sync
+    this.registerObsidianProtocolHandler("obsidian-3way-vault-sync", async (params: ObsidianProtocolData) => {
+      if (params.code) {
+        await this.handleOAuthCallback(params.code);
+      }
+    });
+
+    this.addRibbonIcon('sync', 'Sign in to Google Drive Sync', () => {
+      this.startGoogleLogin();
+    });
+  }
+
+  async startGoogleLogin() {
+    const verifier = PKCE.generateVerifier();
+    const challenge = await PKCE.generateChallenge(verifier);
+
+    this.settings.codeVerifier = verifier;
+    await this.saveSettings();
+
+    const redirectUri = encodeURIComponent("obsidian://obsidian-3way-vault-sync");
+    const scopes = encodeURIComponent("https://www.googleapis.com/auth/drive.file https://www.googleapis.com/oauth2/v3/userinfo");
+
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
+      `client_id=${this.settings.googleClientId}&` +
+      `redirect_uri=${redirectUri}&` +
+      `response_type=code&` +
+      `scope=${scopes}&` +
+      `code_challenge=${challenge}&` +
+      `code_challenge_method=S256`;
+
+    window.open(authUrl);
+  }
+
+  async handleOAuthCallback(code: string) {
+    try {
+      // 1. Exchange code for access tokens
+      const tokenRes = await requestUrl({
+        url: "https://oauth2.googleapis.com/token",
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: this.settings.googleClientId,
+          code: code,
+          code_verifier: this.settings.codeVerifier || "",
+          grant_type: "authorization_code",
+          redirect_uri: "obsidian://obsidian-3way-vault-sync"
+        }).toString()
+      });
+
+      const { access_token, refresh_token } = tokenRes.json;
+
+      // 2. Query user sub ID
+      const userRes = await requestUrl({
+        url: "https://www.googleapis.com/oauth2/v3/userinfo",
+        method: "GET",
+        headers: { Authorization: `Bearer ${access_token}` }
+      });
+
+      const userId = userRes.json.sub;
+      
+      // 3. Automatically derive encryption key
+      this.cryptoKey = await AutoKeyManager.deriveKeyFromUserId(userId);
+
+      // 4. Initialize or fetch sync root folder
+      const folderId = await GoogleDriveAdapter.getOrCreateSyncFolder(access_token);
+
+      this.settings.tokens = { accessToken: access_token, refreshToken: refresh_token };
+      this.settings.googleUserId = userId;
+      this.settings.folderId = folderId;
+      await this.saveSettings();
+
+      new Notice("Google Drive Sync connected & encrypted key generated!");
+    } catch (err) {
+      console.error(err);
+      new Notice("Authentication failed. Check console for details.");
+    }
+  }
+
+  async testSyncFile(file: TFile) {
+    if (!this.cryptoKey || !this.settings.tokens?.accessToken || !this.settings.folderId) {
+      new Notice("Please authenticate first.");
+      return;
+    }
+
+    const token = this.settings.tokens.accessToken;
+    const folderId = this.settings.folderId;
+
+    // Read & Encrypt local content
+    const rawContent = await this.app.vault.read(file);
+    const encryptedBuffer = await VaultCipher.encrypt(this.cryptoKey, rawContent);
+
+    // Upload to Google Drive
+    const uploadedId = await GoogleDriveAdapter.uploadEncryptedFile(
+      token,
+      folderId,
+      file.name,
+      encryptedBuffer
+    );
+
+    // Download & Decrypt to verify
+    const downloadedBuffer = await GoogleDriveAdapter.downloadEncryptedFile(token, uploadedId);
+    const decryptedText = await VaultCipher.decrypt(this.cryptoKey, downloadedBuffer);
+
+    console.log("Decrypted result matched original content:", decryptedText === rawContent);
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
 }
